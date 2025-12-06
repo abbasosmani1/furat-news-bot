@@ -1,0 +1,4 @@
+python-telegram-bot==13.9
+requests
+googletrans==4.0.0-rc1
+feedparser
