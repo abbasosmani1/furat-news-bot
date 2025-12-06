@@ -1,10 +1,10 @@
 import time
+import os
+import re
 import requests
-import feedparser
+from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 from html import unescape
-import re
-import os
 
 # ---------------------------------
 # تنظیمات
@@ -12,7 +12,7 @@ import os
 BOT_TOKEN = "8435178994:AAGY-qQ10TgmG98N1sWiSGqJJh7qBYDokHo"   # مثل: 1234567890:ABC-DEF...
 CHANNEL_USERNAME = "@furatbtc"      # کانالی که ربات در آن ادمین است
 
-RSS_URL = "https://cointelegraph.com/rss"
+BREAKING_URL = "https://arzdigital.com/breaking/"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # مترجم به عربی
@@ -44,24 +44,94 @@ def save_last_published_link(link: str):
         print("خطا در ذخیره آخرین لینک:", e)
 
 
-def clean_html(html_text: str) -> str:
-    """حذف تگ‌های HTML و تبدیل به متن ساده."""
-    if not html_text:
+def clean_text(text: str) -> str:
+    """تمیز کردن فاصله‌ها و تبدیل HTML entities."""
+    if not text:
         return ""
-    # حذف تگ‌های HTML
-    text = re.sub(r"<[^>]+>", "", html_text)
-    # دیکد کردن HTML entities
     text = unescape(text)
-    # تمیز کردن فاصله‌های اضافی
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-def get_latest_news():
-    feed = feedparser.parse(RSS_URL)
-    if not feed.entries:
+def fetch_breaking_page():
+    resp = requests.get(BREAKING_URL, timeout=10)
+    resp.raise_for_status()
+    return resp.text
+
+
+def parse_latest_breaking(html: str):
+    """
+    تلاش می‌کنیم از صفحه‌ی breaking:
+    - اولین خبر
+    - لینک
+    - عنوان
+    - تصویر (در صورت موجود)
+    را استخراج کنیم.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # همه‌ی لینک‌هایی که به یک خبر می‌روند (معمولاً /news/ در URL دارند)
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        # بعضی لینک‌ها نسبی هستند، بعضی مطلق
+        if href.startswith("/"):
+            full = "https://arzdigital.com" + href
+        else:
+            full = href
+
+        # فقط لینک‌های خبر (حدسی: /news/)
+        if "arzdigital.com" in full and "/news/" in full:
+            title = clean_text(a.get_text())
+            if len(title) > 10:  # یه حداقل طول برای حذف لینک‌های ضعیف
+                links.append((full, title, a))
+    
+    if not links:
         return None
-    return feed.entries[0]
+
+    # اولین خبر در صفحه را می‌گیریم
+    link, title, a_tag = links[0]
+
+    # سعی می‌کنیم عکس مرتبط را پیدا کنیم (نزدیک همان لینک)
+    image_url = None
+
+    # 1) اگر داخل تگ <figure> یا والد باشد
+    parent = a_tag.parent
+    for _ in range(3):  # حداکثر 3 سطح بالا می‌رویم
+        if parent is None:
+            break
+        img = parent.find("img")
+        if img and img.get("src"):
+            src = img["src"]
+            if src.startswith("//"):
+                src = "https:" + src
+            elif src.startswith("/"):
+                src = "https://arzdigital.com" + src
+            image_url = src
+            break
+        parent = parent.parent
+
+    # اگر هنوز عکس نداریم، به صورت کلی‌تر یک img نزدیک همان بخش را می‌گیریم
+    if not image_url:
+        img = a_tag.find_previous("img")
+        if img and img.get("src"):
+            src = img["src"]
+            if src.startswith("//"):
+                src = "https:" + src
+            elif src.startswith("/"):
+                src = "https://arzdigital.com" + src
+            image_url = src
+
+    # متن خلاصه‌ی کوتاه (در صفحه‌ی breaking معمولاً زیر یا کنار عنوان هست، ولی ساختارشان ثابت نیست)
+    # برای سادگی فعلاً فقط عنوان را استفاده می‌کنیم.
+    summary = ""
+
+    return {
+        "link": link,
+        "title": title,
+        "summary": summary,
+        "image_url": image_url,
+    }
 
 
 def translate_to_ar(text: str) -> str:
@@ -71,7 +141,7 @@ def translate_to_ar(text: str) -> str:
         return translator.translate(text)
     except Exception as e:
         print("خطا در ترجمه:", e)
-        return text  # اگر ترجمه شکست خورد، متن اصلی را می‌فرستیم
+        return text  # اگر ترجمه شکست خورد، همان متن اصلی را می‌فرستیم
 
 
 def send_message(text: str):
@@ -81,7 +151,7 @@ def send_message(text: str):
     }
     r = requests.post(BASE_URL + "/sendMessage", data=data)
     if not r.ok:
-        print("sendMessage error:", r.text)
+        print("sendMessage error:", r.status_code, r.text)
 
 
 def send_photo_with_caption(photo_url: str, caption: str):
@@ -92,59 +162,47 @@ def send_photo_with_caption(photo_url: str, caption: str):
     }
     r = requests.post(BASE_URL + "/sendPhoto", data=data)
     if not r.ok:
-        print("sendPhoto error:", r.text)
+        print("sendPhoto error:", r.status_code, r.text)
 
 
 # ---------------------------------
-# حلقهٔ اصلی
+# حلقه‌ی اصلی
 # ---------------------------------
 def main_loop():
-    last_published_link = load_last_published_link()
-    print("آخرین لینک قبلی:", last_published_link)
+    last_link = load_last_published_link()
+    print("آخرین لینک قبلی:", last_link)
 
     while True:
         try:
-            item = get_latest_news()
+            html = fetch_breaking_page()
+            item = parse_latest_breaking(html)
+
             if not item:
-                print("هیچ خبری در RSS پیدا نشد.")
+                print("هیچ خبر معتبری در صفحه‌ی breaking پیدا نشد.")
                 time.sleep(60)
                 continue
 
-            link = getattr(item, "link", None)
-            if not link:
-                print("این خبر لینک ندارد، رد شد.")
+            link = item["link"]
+            title = item["title"]
+            summary = item["summary"]
+            image_url = item["image_url"]
+
+            # جلوگیری از ارسال خبر تکراری
+            if link == last_link:
                 time.sleep(60)
                 continue
-
-            # جلوگیری از ارسال دوباره همان خبر
-            if link == last_published_link:
-                # خبری جدید نیست
-                time.sleep(60)
-                continue
-
-            # عنوان و خلاصه خام
-            original_title = getattr(item, "title", "")
-            original_summary_html = getattr(item, "summary", "")
-
-            # پاک کردن HTML از خلاصه
-            clean_summary = clean_html(original_summary_html)
 
             # ترجمه به عربی
-            title_ar = translate_to_ar(original_title)
-            summary_ar = translate_to_ar(clean_summary)
+            title_ar = translate_to_ar(title)
+            summary_ar = translate_to_ar(summary) if summary else ""
 
-            # متن نهایی
-            caption = f"{title_ar}\n\n{summary_ar}\n\n@Furatbtc"
+            # کپشن نهایی
+            if summary_ar:
+                caption = f"{title_ar}\n\n{summary_ar}\n\n{link}\n\n@Furatbtc"
+            else:
+                caption = f"{title_ar}\n\n{link}\n\n@Furatbtc"
 
-            # استخراج تصویر (اگر موجود باشد)
-            image_url = None
-            if hasattr(item, "media_content"):
-                try:
-                    if item.media_content:
-                        image_url = item.media_content[0].get("url")
-                except Exception as e:
-                    print("خطا در خواندن media_content:", e)
-
+            # ارسال
             if image_url:
                 print("ارسال خبر جدید با تصویر...")
                 send_photo_with_caption(image_url, caption)
@@ -152,16 +210,15 @@ def main_loop():
                 print("ارسال خبر جدید بدون تصویر...")
                 send_message(caption)
 
-            # ذخیره آخرین لینک برای جلوگیری از تکرار
-            last_published_link = link
+            # ذخیره لینک برای جلوگیری از تکرار
+            last_link = link
             save_last_published_link(link)
 
-            # فاصله بین چک‌کردن‌ها (ثانیه)
             time.sleep(60)
 
         except Exception as e:
             print("Error in main_loop:", e)
-            time.sleep(10)
+            time.sleep(15)
 
 
 if __name__ == "__main__":
