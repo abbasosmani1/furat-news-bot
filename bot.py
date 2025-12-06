@@ -2,23 +2,61 @@ import time
 import requests
 import feedparser
 from deep_translator import GoogleTranslator
+from html import unescape
+import re
+import os
 
-# -----------------------------
-# تنظیمات ربات
-# -----------------------------
-BOT_TOKEN = "8435178994:AAGY-qQ10TgmG98N1sWiSGqJJh7qBYDokHo"   # مثل: 1234567890:ABC....
-CHANNEL_USERNAME = "@furatbtc"      # کانالی که ربات توش ادمینه
+# ---------------------------------
+# تنظیمات
+# ---------------------------------
+BOT_TOKEN = "8435178994:AAGY-qQ10TgmG98N1sWiSGqJJh7qBYDokHo"   # مثل: 1234567890:ABC-DEF...
+CHANNEL_USERNAME = "@furatbtc"      # کانالی که ربات در آن ادمین است
 
 RSS_URL = "https://cointelegraph.com/rss"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-translator = GoogleTranslator(source="auto", target="fa")
-LAST_PUBLISHED_LINK = None  # برای جلوگیری از ارسال تکراری
+# مترجم به عربی
+translator = GoogleTranslator(source="auto", target="ar")
+
+# فایل برای ذخیره آخرین لینک ارسال‌شده (برای جلوگیری از تکرار)
+LAST_LINK_FILE = "last_link.txt"
 
 
-# -----------------------------
-# گرفتن آخرین خبر از RSS
-# -----------------------------
+# ---------------------------------
+# توابع کمکی
+# ---------------------------------
+def load_last_published_link():
+    if os.path.exists(LAST_LINK_FILE):
+        try:
+            with open(LAST_LINK_FILE, "r", encoding="utf-8") as f:
+                link = f.read().strip()
+                return link if link else None
+        except Exception as e:
+            print("خطا در خواندن فایل آخرین لینک:", e)
+    return None
+
+
+def save_last_published_link(link: str):
+    try:
+        with open(LAST_LINK_FILE, "w", encoding="utf-8") as f:
+            f.write(link or "")
+    except Exception as e:
+        print("خطا در ذخیره آخرین لینک:", e)
+
+
+def clean_html(html_text: str) -> str:
+    """حذف تگ‌های HTML و تبدیل به متن ساده."""
+    if not html_text:
+        return ""
+    # حذف تگ‌های HTML
+    text = re.sub(r"<[^>]+>", "", html_text)
+    # دیکد کردن HTML entities
+    text = unescape(text)
+    # تمیز کردن فاصله‌های اضافی
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def get_latest_news():
     feed = feedparser.parse(RSS_URL)
     if not feed.entries:
@@ -26,18 +64,16 @@ def get_latest_news():
     return feed.entries[0]
 
 
-# -----------------------------
-# ترجمه متن به فارسی
-# -----------------------------
-def translate_to_fa(text: str) -> str:
+def translate_to_ar(text: str) -> str:
     if not text:
         return ""
-    return translator.translate(text)
+    try:
+        return translator.translate(text)
+    except Exception as e:
+        print("خطا در ترجمه:", e)
+        return text  # اگر ترجمه شکست خورد، متن اصلی را می‌فرستیم
 
 
-# -----------------------------
-# ارسال پیام متنی به کانال
-# -----------------------------
 def send_message(text: str):
     data = {
         "chat_id": CHANNEL_USERNAME,
@@ -48,9 +84,6 @@ def send_message(text: str):
         print("sendMessage error:", r.text)
 
 
-# -----------------------------
-# ارسال عکس به همراه کپشن
-# -----------------------------
 def send_photo_with_caption(photo_url: str, caption: str):
     data = {
         "chat_id": CHANNEL_USERNAME,
@@ -62,11 +95,12 @@ def send_photo_with_caption(photo_url: str, caption: str):
         print("sendPhoto error:", r.text)
 
 
-# -----------------------------
-# حلقهٔ اصلی ربات
-# -----------------------------
+# ---------------------------------
+# حلقهٔ اصلی
+# ---------------------------------
 def main_loop():
-    global LAST_PUBLISHED_LINK
+    last_published_link = load_last_published_link()
+    print("آخرین لینک قبلی:", last_published_link)
 
     while True:
         try:
@@ -76,25 +110,33 @@ def main_loop():
                 time.sleep(60)
                 continue
 
-            link = item.link
+            link = getattr(item, "link", None)
+            if not link:
+                print("این خبر لینک ندارد، رد شد.")
+                time.sleep(60)
+                continue
 
-            # جلوگیری از ارسال خبر تکراری
-            if link == LAST_PUBLISHED_LINK:
+            # جلوگیری از ارسال دوباره همان خبر
+            if link == last_published_link:
                 # خبری جدید نیست
                 time.sleep(60)
                 continue
 
-            # عنوان و خلاصه را ترجمه می‌کنیم
+            # عنوان و خلاصه خام
             original_title = getattr(item, "title", "")
-            original_summary = getattr(item, "summary", "")
+            original_summary_html = getattr(item, "summary", "")
 
-            title_fa = translate_to_fa(original_title)
-            summary_fa = translate_to_fa(original_summary)
+            # پاک کردن HTML از خلاصه
+            clean_summary = clean_html(original_summary_html)
 
-            # متن نهایی برای ارسال
-            caption = f"{title_fa}\n\n{summary_fa}\n\n@Furatbtc"
+            # ترجمه به عربی
+            title_ar = translate_to_ar(original_title)
+            summary_ar = translate_to_ar(clean_summary)
 
-            # پیدا کردن عکس اگر وجود داشته باشد
+            # متن نهایی
+            caption = f"{title_ar}\n\n{summary_ar}\n\n@Furatbtc"
+
+            # استخراج تصویر (اگر موجود باشد)
             image_url = None
             if hasattr(item, "media_content"):
                 try:
@@ -104,15 +146,17 @@ def main_loop():
                     print("خطا در خواندن media_content:", e)
 
             if image_url:
-                print("ارسال خبر به همراه عکس...")
+                print("ارسال خبر جدید با تصویر...")
                 send_photo_with_caption(image_url, caption)
             else:
-                print("ارسال خبر بدون عکس...")
+                print("ارسال خبر جدید بدون تصویر...")
                 send_message(caption)
 
-            LAST_PUBLISHED_LINK = link
+            # ذخیره آخرین لینک برای جلوگیری از تکرار
+            last_published_link = link
+            save_last_published_link(link)
 
-            # کمی صبر می‌کنیم تا دوباره چک کنیم (مثلاً هر ۶۰ ثانیه)
+            # فاصله بین چک‌کردن‌ها (ثانیه)
             time.sleep(60)
 
         except Exception as e:
