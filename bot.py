@@ -2,7 +2,7 @@ import requests
 import time
 import os
 
-BOT_TOKEN = os.environ["8435178994:AAGY-qQ10TgmG98N1sWiSGqJJh7qBYDokHo"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = "@furatbtc"
 API_URL = os.environ["SCRAPER_URL"]  # مثلاً https://yourapp.onrender.com/breaking
 
